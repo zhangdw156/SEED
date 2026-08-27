@@ -56,5 +56,3 @@ Search Tool Integration
 
 .. toctree::
    :maxdepth: 1
-
-   search_tool_example

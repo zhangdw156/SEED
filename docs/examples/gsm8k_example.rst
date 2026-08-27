@@ -64,7 +64,7 @@ There're three ways to prepare the model checkpoints for post-training:
   deepseek-ai/deepseek-math-7b-instruct) in
   ``actor_rollout_ref.model.path`` and ``critic.model.path`` field in
   the run script. You can also download models from modelscope by setting environmental variable ``VERL_USE_MODELSCOPE=True``.
-  See examples/ppo_trainer/run_deepseek7b_llm_modelscope.sh for example.
+  See the upstream veRL PPO examples; this branch only ships SEED launchers.
 
 Noted that users should prepare checkpoints for actor, critic and reward
 model.
@@ -126,7 +126,7 @@ answer, 0.1 to incorrect answer and 0 to no answer.
 
 **Training Script**
 
-The training script example for FSDP and Megatron-LM backend are stored in examples/ppo_trainer directory.
+The generic FSDP and Megatron-LM examples remain available in upstream veRL.
 
 .. code:: bash
 

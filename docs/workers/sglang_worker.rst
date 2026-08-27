@@ -42,7 +42,7 @@ We use Qwen/Qwen2-7B-Instruct on the gsm8k dataset for a simple test.
 
 .. code-block:: bash
 
-    python3 examples/data_preprocess/gsm8k.py
+    # Generic GSM8K preprocessing is not shipped on exp/iclr.
 
 2. Run the following script to conduct a PPO experiment on a single machine with 4 GPUs:
 

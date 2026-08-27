@@ -23,6 +23,11 @@ import torchvision.transforms as T
 import ray
 
 from agent_system.environments.env_package.alfworld.alfworld.agents.environment import get_environment
+from agent_system.environments.fairness import (
+    alfworld_fairness_split,
+    alfworld_gamefiles,
+    alfworld_worker_gamefiles,
+)
 
 ALF_ACTION_LIST=["pass", "goto", "pick", "put", "open", "close", "toggle", "heat", "clean", "cool", "slice", "inventory", "examine", "look"]
 # ALF_ITEM_LIST =
@@ -58,7 +63,10 @@ class AlfworldWorker:
     Each actor holds one environment instance.
     """
     
-    def __init__(self, config, seed, base_env):
+    def __init__(self, config, seed, base_env, game_file=None):
+        if game_file is not None:
+            base_env.game_files = [game_file]
+            base_env.num_games = 1
         self.env = base_env.init_env(batch_size=1)  # Each worker holds only one sub-environment
         self.env.seed(seed)
     
@@ -83,8 +91,9 @@ class AlfworldWorker:
         return image
 
 class AlfworldEnvs(gym.Env):
-    def __init__(self, alf_config_path, seed, env_num, group_n, resources_per_worker, is_train=True, env_kwargs={}):
+    def __init__(self, alf_config_path, seed, env_num, group_n, resources_per_worker, is_train=True, env_kwargs=None):
         super().__init__()
+        env_kwargs = {} if env_kwargs is None else env_kwargs
         
         # Initialize Ray if not already initialized
         if not ray.is_initialized():
@@ -93,16 +102,51 @@ class AlfworldEnvs(gym.Env):
         eval_dataset = env_kwargs.get('eval_dataset', 'eval_in_distribution')
         config = load_config_file(alf_config_path)
         env_type = config['env']['type']
+        fairness_enabled = bool(env_kwargs.get('fairness', True))
+        canonical_game_files = None
+        if fairness_enabled:
+            fairness_split = alfworld_fairness_split(
+                is_train=is_train,
+                eval_dataset=eval_dataset,
+                requested_split=env_kwargs.get('fairness_split'),
+            )
+            configured_game_files = env_kwargs.get('fairness_game_files')
+            canonical_game_files = [
+                os.path.expanduser(os.path.expandvars(path))
+                for path in (
+                    configured_game_files
+                    if configured_game_files is not None
+                    else alfworld_gamefiles(fairness_split)
+                )
+            ]
+            config['dataset']['game_files'] = canonical_game_files
         base_env = get_environment(env_type)(config, train_eval='train' if is_train else eval_dataset)
+        if canonical_game_files is not None:
+            setattr(base_env, "game_files", canonical_game_files)
+            setattr(base_env, "num_games", len(canonical_game_files))
         self.multi_modal = (env_type == 'AlfredThorEnv')
         self.num_processes = env_num * group_n
         self.group_n = group_n
+        worker_game_files = (
+            [None] * self.num_processes
+            if canonical_game_files is None
+            else alfworld_worker_gamefiles(
+                fixed_assignment=not is_train,
+                canonical_gamefiles=canonical_game_files,
+                num_processes=self.num_processes,
+            )
+        )
 
         # Create Ray remote actors instead of processes
         env_worker = ray.remote(**resources_per_worker)(AlfworldWorker)
         self.workers = []
-        for i in range(self.num_processes):
-            worker = env_worker.remote(config, seed + (i // self.group_n), base_env)
+        for i, game_file in enumerate(worker_game_files):
+            worker = env_worker.remote(
+                config,
+                seed + (i // self.group_n),
+                base_env,
+                game_file,
+            )
             self.workers.append(worker)
 
         self.prev_admissible_commands = [None for _ in range(self.num_processes)]
@@ -202,5 +246,5 @@ class AlfworldEnvs(gym.Env):
         for worker in self.workers:
             ray.kill(worker)
 
-def build_alfworld_envs(alf_config_path, seed, env_num, group_n, resources_per_worker, is_train=True, env_kwargs={}):
+def build_alfworld_envs(alf_config_path, seed, env_num, group_n, resources_per_worker, is_train=True, env_kwargs=None):
     return AlfworldEnvs(alf_config_path, seed, env_num, group_n, resources_per_worker, is_train, env_kwargs)

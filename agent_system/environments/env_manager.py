@@ -13,16 +13,224 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Tuple, Dict, Union, Any
-from collections import defaultdict
-import torch
-import numpy as np
-from functools import partial
 import os
-from agent_system.environments.prompts import *
-from agent_system.environments.base import EnvironmentManagerBase, to_numpy
-from agent_system.memory import SimpleMemory, SearchMemory
+from dataclasses import dataclass
+from functools import partial
+from typing import Any, Callable, Dict, Iterator, List, Tuple, cast
+
+import numpy as np
 from omegaconf import OmegaConf
+
+from agent_system.environments.base import EnvironmentManagerBase, to_numpy
+from agent_system.environments.prompts import *
+from agent_system.memory import SimpleMemory, SearchMemory
+
+
+@dataclass(frozen=True)
+class CanonicalValidationChunk:
+    split: str
+    metric_prefix: str
+    task_count: int
+    task_type_counts: dict[str, int]
+    manager: EnvironmentManagerBase
+
+
+class LazyEnvironmentManager:
+    """Create a training manager on first use and release it before validation."""
+
+    def __init__(self, factory: Callable[[], EnvironmentManagerBase]) -> None:
+        self._factory = factory
+        self._manager = None
+        self._closed = False
+
+    def _acquire(self):
+        if self._closed:
+            raise RuntimeError("Lazy environment manager is closed")
+        if self._manager is None:
+            self._manager = self._factory()
+        return self._manager
+
+    @property
+    def is_active(self) -> bool:
+        return self._manager is not None
+
+    def release(self) -> None:
+        manager = self._manager
+        self._manager = None
+        if manager is not None:
+            manager.close()
+
+    def close(self) -> None:
+        if not self._closed:
+            self.release()
+            self._closed = True
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self._acquire(), name)
+
+
+class CanonicalValidationEnvironments:
+    """Construct exhaustive fair validation managers in bounded chunks."""
+
+    def __init__(
+        self,
+        config,
+        *,
+        resources_per_worker,
+        concurrency=128,
+        on_validation_start=None,
+    ):
+        self.config = config
+        self.resources_per_worker = resources_per_worker
+        self.concurrency = concurrency
+        self.on_validation_start = on_validation_start
+
+    @staticmethod
+    def _alfworld_task_type_counts(game_files):
+        labels = (
+            "pick_and_place",
+            "pick_two_obj_and_place",
+            "look_at_obj_in_light",
+            "pick_heat_then_place_in_recep",
+            "pick_cool_then_place_in_recep",
+            "pick_clean_then_place_in_recep",
+        )
+        return {
+            f"{label}_success_rate": sum(
+                label in game_file for game_file in game_files
+            )
+            for label in labels
+            if any(label in game_file for game_file in game_files)
+        }
+
+    def iter_chunks(self) -> Iterator[CanonicalValidationChunk]:
+        if self.on_validation_start is not None:
+            self.on_validation_start()
+
+        from agent_system.environments.fairness import (
+            canonical_validation_chunks,
+            canonical_validation_splits,
+        )
+
+        require_think = _projection_requires_think(self.config)
+        env_name = str(self.config.env.env_name).lower()
+        if "alfworld" in env_name:
+            from agent_system.environments.env_package.alfworld import (
+                alfworld_projection,
+                build_alfworld_envs,
+            )
+
+            config_path = os.path.join(
+                os.path.dirname(__file__),
+                "env_package/alfworld/configs/config_tw.yaml",
+            )
+            for split in canonical_validation_splits("alfworld"):
+                prefix = "seen/" if split == "evaluation_seen" else "unseen/"
+                eval_dataset = (
+                    "eval_in_distribution"
+                    if split == "evaluation_seen"
+                    else "eval_out_of_distribution"
+                )
+                for game_files in canonical_validation_chunks(
+                    "alfworld",
+                    split,
+                    concurrency=self.concurrency,
+                ):
+                    raw_envs = build_alfworld_envs(
+                        config_path,
+                        self.config.env.seed + 1000,
+                        len(game_files),
+                        1,
+                        is_train=False,
+                        env_kwargs={
+                            "eval_dataset": eval_dataset,
+                            "fairness": True,
+                            "fairness_split": split,
+                            "fairness_game_files": game_files,
+                        },
+                        resources_per_worker=self.resources_per_worker,
+                    )
+                    manager = AlfWorldEnvironmentManager(
+                        raw_envs,
+                        partial(
+                            alfworld_projection,
+                            require_think=require_think,
+                        ),
+                        self.config,
+                    )
+                    try:
+                        yield CanonicalValidationChunk(
+                            split,
+                            prefix,
+                            len(game_files),
+                            self._alfworld_task_type_counts(game_files),
+                            manager,
+                        )
+                    finally:
+                        manager.close()
+            return
+
+        if "webshop" in env_name:
+            from agent_system.environments.env_package.webshop import (
+                build_webshop_envs,
+                webshop_projection,
+            )
+
+            file_path = os.path.join(
+                os.path.dirname(__file__),
+                "env_package/webshop/webshop/data/items_shuffle"
+                + ("_1000.json" if self.config.env.webshop.use_small else ".json"),
+            )
+            for split in canonical_validation_splits("webshop"):
+                for goal_indices in canonical_validation_chunks(
+                    "webshop",
+                    split,
+                    concurrency=self.concurrency,
+                ):
+                    raw_envs = build_webshop_envs(
+                        seed=self.config.env.seed + 1000,
+                        env_num=len(goal_indices),
+                        group_n=1,
+                        is_train=False,
+                        env_kwargs={
+                            "observation_mode": "text",
+                            "num_products": None,
+                            "human_goals": self.config.env.webshop.human_goals,
+                            "file_path": file_path,
+                            "fairness": True,
+                            "fairness_split": split,
+                            "fairness_goal_indices": goal_indices,
+                        },
+                        resources_per_worker=self.resources_per_worker,
+                    )
+                    manager = WebshopEnvironmentManager(
+                        raw_envs,
+                        partial(
+                            webshop_projection,
+                            require_think=require_think,
+                        ),
+                        self.config,
+                    )
+                    try:
+                        yield CanonicalValidationChunk(
+                            split,
+                            "",
+                            len(goal_indices),
+                            {},
+                            manager,
+                        )
+                    finally:
+                        manager.close()
+            return
+        raise ValueError(
+            f"Canonical validation is unsupported for "
+            f"{self.config.env.env_name!r}"
+        )
+
+    def close(self) -> None:
+        return None
 
 
 def _mapping_select(config, key: str, default=None):
@@ -1114,7 +1322,13 @@ def make_envs(config):
     if not isinstance(config.env.rollout.n, int):
         raise ValueError("config.env.rollout.n should be an integer")
     group_n = config.env.rollout.n if config.env.rollout.n > 0 else 1
-    resources_per_worker = OmegaConf.to_container(config.env.resources_per_worker, resolve=True)
+    resources_per_worker = cast(
+        dict,
+        OmegaConf.to_container(
+            config.env.resources_per_worker,
+            resolve=True,
+        ),
+    )
     projection_require_think = _projection_requires_think(config)
 
     if "search" in config.env.env_name.lower():
@@ -1146,13 +1360,36 @@ def make_envs(config):
 
         env_kwargs = {
             'eval_dataset': config.env.alfworld.eval_dataset, # 'eval_in_distribution' or 'eval_out_of_distribution'
+            'fairness': bool(config.env.get('fairness', True)),
         }
         _envs = build_alfworld_envs(alf_config_path, config.env.seed, config.data.train_batch_size, group_n, is_train=True, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
-        _val_envs = build_alfworld_envs(alf_config_path, config.env.seed + 1000, config.data.val_batch_size, 1, is_train=False, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
         
         projection_f = partial(alfworld_projection, require_think=projection_require_think)
         envs = AlfWorldEnvironmentManager(_envs, projection_f, config)
-        val_envs = AlfWorldEnvironmentManager(_val_envs, projection_f, config)
+        if bool(config.env.get('fairness', True)):
+            val_envs = CanonicalValidationEnvironments(
+                config,
+                resources_per_worker=resources_per_worker,
+                concurrency=int(config.env.get('validation_concurrency', 128)),
+            )
+        else:
+            _val_envs = build_alfworld_envs(
+                alf_config_path,
+                config.env.seed + 1000,
+                config.data.val_batch_size,
+                1,
+                is_train=False,
+                env_kwargs={
+                    'eval_dataset': config.env.alfworld.eval_dataset,
+                    'fairness': False,
+                },
+                resources_per_worker=resources_per_worker,
+            )
+            val_envs = AlfWorldEnvironmentManager(
+                _val_envs,
+                projection_f,
+                config,
+            )
         return envs, val_envs
     elif "sokoban" in config.env.env_name.lower():
         from agent_system.environments.env_package.sokoban import build_sokoban_envs, sokoban_projection
@@ -1171,6 +1408,7 @@ def make_envs(config):
         return envs, val_envs
     elif "webshop" in config.env.env_name.lower():
         from agent_system.environments.env_package.webshop import build_webshop_envs, webshop_projection
+        fairness_enabled = bool(config.env.get('fairness', True))
         if config.env.webshop.use_small:
             file_path = os.path.join(os.path.dirname(__file__), 'env_package/webshop/webshop/data/items_shuffle_1000.json')
             attr_path = os.path.join(os.path.dirname(__file__), 'env_package/webshop/webshop/data/items_ins_v2_1000.json')
@@ -1182,12 +1420,45 @@ def make_envs(config):
                     'num_products': None, 
                     'human_goals': config.env.webshop.human_goals,
                     'file_path': file_path,
-                    'attr_path': attr_path
+                    'attr_path': attr_path,
+                    'fairness': fairness_enabled,
                     }
+        projection_f = partial(webshop_projection, require_think=projection_require_think)
+        if fairness_enabled:
+            if config.trainer.get("val_only", False):
+                envs = None
+            else:
+                training_rng = np.random.RandomState(config.env.seed)
+
+                def build_training_manager():
+                    raw_envs = build_webshop_envs(
+                        seed=config.env.seed,
+                        env_num=config.data.train_batch_size,
+                        group_n=group_n,
+                        is_train=True,
+                        env_kwargs=env_kwargs,
+                        resources_per_worker=resources_per_worker,
+                        rng=training_rng,
+                    )
+                    return WebshopEnvironmentManager(
+                        raw_envs,
+                        projection_f,
+                        config,
+                    )
+
+                envs = LazyEnvironmentManager(build_training_manager)
+            val_envs = CanonicalValidationEnvironments(
+                config,
+                resources_per_worker=resources_per_worker,
+                concurrency=int(config.env.get('validation_concurrency', 128)),
+                on_validation_start=(
+                    envs.release if envs is not None else None
+                ),
+            )
+            return envs, val_envs
+
         _envs = build_webshop_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
         _val_envs = build_webshop_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_kwargs=env_kwargs, resources_per_worker=resources_per_worker)
-
-        projection_f = partial(webshop_projection, require_think=projection_require_think)
         envs = WebshopEnvironmentManager(_envs, projection_f, config)
         val_envs = WebshopEnvironmentManager(_val_envs, projection_f, config)
         import time

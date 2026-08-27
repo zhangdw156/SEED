@@ -13,13 +13,15 @@ nlp = spacy.load("en_core_web_sm")
 
 PRICE_RANGE = [10.0 * i for i in range(1, 100)]
 
-def get_goals(all_products, product_prices, human_goals=True):
+def get_goals(all_products, product_prices, human_goals=True, rng=None):
+    rng = random if rng is None else rng
     if human_goals:
-        return get_human_goals(all_products, product_prices)
+        return get_human_goals(all_products, product_prices, rng=rng)
     else:
-        return get_synthetic_goals(all_products, product_prices)
+        return get_synthetic_goals(all_products, product_prices, rng=rng)
     
-def get_human_goals(all_products, product_prices):
+def get_human_goals(all_products, product_prices, rng=None):
+    rng = random if rng is None else rng
     goals = []
     cnt_atts = defaultdict(int)
     cnt = 0
@@ -36,7 +38,7 @@ def get_human_goals(all_products, product_prices):
                 price = product_prices[asin]
                 price_range = [p for p in PRICE_RANGE if p > price][:4]
                 if len(price_range) >= 2:
-                    _, price_upper = sorted(random.sample(price_range, 2))
+                    _, price_upper = sorted(rng.sample(price_range, 2))
                     price_text = \
                         f', and price lower than {price_upper:.2f} dollars'
                 else:
@@ -65,7 +67,8 @@ def get_human_goals(all_products, product_prices):
     return goals
 
 
-def get_synthetic_goals(all_products, product_prices):
+def get_synthetic_goals(all_products, product_prices, rng=None):
+    rng = random if rng is None else rng
     goals = []
     cnt_atts = defaultdict(int)
     for product in all_products:
@@ -81,7 +84,7 @@ def get_synthetic_goals(all_products, product_prices):
             price = product_prices[asin]
             price_range = [p for p in PRICE_RANGE if p > price][:4]
             if len(price_range) >= 2:
-                _, price_upper = sorted(random.sample(price_range, 2))
+                _, price_upper = sorted(rng.sample(price_range, 2))
                 price_text = \
                     f', and price lower than {price_upper:.2f} dollars'
             else:

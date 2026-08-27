@@ -82,4 +82,4 @@ Example Script
 
 For an end-to-end example, refer to the script below:
 
-examples/grpo_trainer/run_qwen2_5-3b_gsm8k_grpo_lora.sh
+Refer to the upstream veRL LoRA examples; this branch only ships SEED launchers.

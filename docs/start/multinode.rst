@@ -114,7 +114,7 @@ Once the fleet is created, define a Ray cluster task, e.g. in ``ray-cluster.dsta
         - pip install hf_transfer hf_xet
         - |
         if [ $DSTACK_NODE_RANK = 0 ]; then
-            python3 examples/data_preprocess/gsm8k.py --local_dir ~/data/gsm8k
+            # Generic GSM8K preprocessing is not shipped on exp/iclr.
             python3 -c "import transformers; transformers.pipeline('text-generation', model='Qwen/Qwen2.5-7B-Instruct')" 
             ray start --head --port=6379;
         else
@@ -516,11 +516,11 @@ slurm_script.sh
 
     echo "Starting data preprocessing..."
     docker exec "${CONTAINER_NAME}" \
-        python3 "examples/data_preprocess/gsm8k.py" "--local_dir" "../data/gsm8k"
+        # Generic GSM8K preprocessing is not shipped on exp/iclr.
 
     echo "Starting data preprocessing..."
     docker exec "${CONTAINER_NAME}" \
-        python3 "examples/data_preprocess/math_dataset.py" "--local_dir" "../data/math"
+        # Generic math preprocessing is not shipped on exp/iclr.
 
     train_files="../data/gsm8k/train.parquet"
     val_files="../data/gsm8k/test.parquet"
@@ -593,4 +593,3 @@ Just sbatch your slurm_script.sh
 .. code-block:: bash
 
     sbatch slurm_script.sh
-

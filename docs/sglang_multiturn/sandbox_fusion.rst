@@ -208,7 +208,7 @@ Unit Tests
 
 e2e Tests
 ----------
-we provide e2e test scripts in `tests/e2e` folder, named `tests/e2e/run_gsm8k_fsdp_sgl_multiturn_sf_tool.sh`
+The generic upstream e2e script is not shipped on the `exp/iclr` branch.
 
 by setting 'trainer.rollout_data_dir' you can dump the rollout data to local disk. here is an sample taken from the rollout data:
 

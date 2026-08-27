@@ -184,8 +184,14 @@ class TaskRunner:
             envs=envs,
             val_envs=val_envs,
         )
-        trainer.init_workers()
-        trainer.fit()
+        try:
+            trainer.init_workers()
+            trainer.fit()
+        finally:
+            for environment in (envs, val_envs):
+                close = getattr(environment, "close", None)
+                if callable(close):
+                    close()
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor):

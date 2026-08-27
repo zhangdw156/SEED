@@ -135,7 +135,7 @@ PPO
 
     GPUS_PER_NODE=8
     MODEL_PATH=Qwen/Qwen2.5-0.5B-Instruct
-    python3 examples/data_preprocess/gsm8k.py --local_dir data/gsm8k
+    # Generic GSM8K preprocessing is not shipped on exp/iclr.
     python3 -c "import transformers; transformers.pipeline('text-generation', model='$MODEL_PATH')"
     ENGINE=vllm #sglang
 
@@ -191,7 +191,7 @@ GRPO
     GPUS_PER_NODE=8
     MODEL_PATH=Qwen/Qwen2.5-0.5B-Instruct
     # MODEL_PATH=Qwen/Qwen2-7B-Instruct
-    python3 examples/data_preprocess/gsm8k.py --local_dir data/gsm8k
+    # Generic GSM8K preprocessing is not shipped on exp/iclr.
     python3 -c "import transformers; transformers.pipeline('text-generation', model='$MODEL_PATH')"
     ENGINE=vllm #sglang
     
@@ -471,11 +471,11 @@ slurm_script.sh
 
     echo "Starting data preprocessing..."
     docker exec "${CONTAINER_NAME}" \
-        python3 "examples/data_preprocess/gsm8k.py" "--local_dir" "../data/gsm8k"
+        # Generic GSM8K preprocessing is not shipped on exp/iclr.
 
     echo "Starting data preprocessing..."
     docker exec "${CONTAINER_NAME}" \
-        python3 "examples/data_preprocess/math_dataset.py" "--local_dir" "../data/math"
+        # Generic math preprocessing is not shipped on exp/iclr.
 
     train_files="../data/gsm8k/train.parquet"
     val_files="../data/gsm8k/test.parquet"
@@ -548,4 +548,3 @@ Just sbatch your slurm_script.sh
 .. code-block:: bash
 
     sbatch slurm_script.sh
-

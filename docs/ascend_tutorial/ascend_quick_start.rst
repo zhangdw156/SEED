@@ -93,7 +93,7 @@ vllm & vllm-ascend
 
 .. code-block:: bash
 
-    python3 examples/data_preprocess/gsm8k.py --local_dir ~/data/gsm8k
+    # Generic GSM8K preprocessing is not shipped on exp/iclr.
 
 2.执行训练
 

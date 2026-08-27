@@ -124,7 +124,19 @@ class AlfredTWEnv(object):
                    " the script `alfworld-generate`. Ignoring it and loading games as they are.")
             print(colored(msg, "yellow"))
 
-        self.collect_game_files()
+        configured_game_files = config.get("dataset", {}).get("game_files")
+        if configured_game_files is None:
+            self.collect_game_files()
+        else:
+            self.game_files = [
+                os.path.expandvars(os.path.expanduser(game_file))
+                for game_file in configured_game_files
+            ]
+            self.num_games = len(self.game_files)
+            print(
+                f"Loaded {self.num_games} explicit games "
+                f"for split={self.train_eval}"
+            )
         self.use_expert = False
         print(f"use_expert = {self.use_expert}")
     def collect_game_files(self, verbose=False):

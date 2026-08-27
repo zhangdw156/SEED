@@ -16,6 +16,13 @@
 import ray
 import gym
 import numpy as np
+from typing import Any
+
+from agent_system.environments.fairness import (
+    webshop_goal_fingerprint,
+    webshop_goal_indices,
+    webshop_reset_goal_indices,
+)
 
 # -----------------------------------------------------------------------------
 # Ray remote worker actor -----------------------------------------------------
@@ -34,8 +41,13 @@ class WebshopWorker:
         sys.path.append(project_root)
         from web_agent_site.envs import WebAgentTextEnv  # noqa: WPS433 (runtime import)
         
+        env_kwargs = dict(env_kwargs)
         env_kwargs['seed'] = seed
         self.env = gym.make('WebAgentTextEnv-v0', disable_env_checker=True, **env_kwargs)
+        goals = getattr(getattr(self.env, 'server', None), 'goals', None)
+        self._goal_fingerprint = (
+            None if goals is None else webshop_goal_fingerprint(goals)
+        )
     
     def step(self, action):
         """Execute a step in the environment"""
@@ -74,6 +86,13 @@ class WebshopWorker:
     def get_goals(self):
         """Get environment goals"""
         return self.env.server.goals
+
+    def get_goal_fingerprint(self):
+        if self._goal_fingerprint is None:
+            raise ValueError(
+                'WebShop environment does not expose resolved goals'
+            )
+        return self._goal_fingerprint
     
     def close(self):
         """Close the environment"""
@@ -99,6 +118,7 @@ class WebshopMultiProcessEnv(gym.Env):
         resources_per_worker: dict,
         is_train: bool = True,
         env_kwargs: dict = None,
+        rng: np.random.RandomState | None = None,
     ) -> None:
         super().__init__()
 
@@ -112,9 +132,26 @@ class WebshopMultiProcessEnv(gym.Env):
         self.is_train = is_train
         if not is_train: assert group_n == 1
 
-        self._rng = np.random.RandomState(seed)
+        self._rng = rng if rng is not None else np.random.RandomState(seed)
 
-        self._env_kwargs = env_kwargs if env_kwargs is not None else {'observation_mode': 'text', 'num_products': None}
+        self._env_kwargs: dict[str, Any] = dict(
+            env_kwargs
+            if env_kwargs is not None
+            else {'observation_mode': 'text', 'num_products': None}
+        )
+        configured_goal_indices = self._env_kwargs.pop(
+            'fairness_goal_indices',
+            None,
+        )
+        configured_fairness_split = self._env_kwargs.pop(
+            'fairness_split',
+            None,
+        )
+        self.fairness_enabled = bool(
+            self._env_kwargs.pop('fairness', True)
+        )
+        if self.fairness_enabled:
+            self._env_kwargs['goal_seed'] = 0
 
         # -------------------------- Ray actors setup --------------------------
         env_worker = ray.remote(**resources_per_worker)(WebshopWorker)
@@ -122,6 +159,18 @@ class WebshopMultiProcessEnv(gym.Env):
         for i in range(self.num_processes):
             worker = env_worker.remote(seed + (i // self.group_n), self._env_kwargs)
             self._workers.append(worker)
+
+        if self.fairness_enabled:
+            fingerprints = ray.get([
+                worker.get_goal_fingerprint.remote()
+                for worker in self._workers
+            ])
+            if len(set(fingerprints)) != 1:
+                for worker in self._workers:
+                    ray.kill(worker)
+                raise ValueError(
+                    'WebShop workers resolved different canonical goal lists'
+                )
 
         # Get goals from the first worker
         goals_future = self._workers[0].get_goals.remote()
@@ -138,10 +187,26 @@ class WebshopMultiProcessEnv(gym.Env):
         # else:
         #     self.goal_idxs = range(len(self.env.server.goals))
 
-        if not self.is_train:
-            self.goal_idxs = range(500)
+        if self.fairness_enabled:
+            fairness_split = (
+                configured_fairness_split
+                or ('train' if self.is_train else 'evaluation')
+            )
+            self.goal_idxs: list[int] = (
+                [int(value) for value in configured_goal_indices]
+                if configured_goal_indices is not None
+                else webshop_goal_indices(fairness_split)
+            )
+            if max(self.goal_idxs) >= len(goals):
+                raise ValueError(
+                    f'WebShop fairness goal index '
+                    f'{max(self.goal_idxs)} exceeds '
+                    f'the canonical goal count {len(goals)}'
+                )
+        elif not self.is_train:
+            self.goal_idxs = list(range(500))
         else:
-            self.goal_idxs = range(500, len(goals))
+            self.goal_idxs = list(range(500, len(goals)))
             
         print(self.goal_idxs)
 
@@ -173,8 +238,14 @@ class WebshopMultiProcessEnv(gym.Env):
         return obs_list, reward_list, done_list, info_list
 
     def reset(self):
-        idx = self._rng.choice(self.goal_idxs, size=self.env_num, replace=False)
-        idx = np.repeat(idx, self.group_n).tolist()
+        idx = webshop_reset_goal_indices(
+            is_train=self.is_train,
+            fairness_enabled=self.fairness_enabled,
+            goal_indices=self.goal_idxs,
+            env_num=self.env_num,
+            group_n=self.group_n,
+            rng=self._rng,
+        )
 
         # Send reset commands to all workers
         futures = []
@@ -245,6 +316,7 @@ def build_webshop_envs(
     resources_per_worker: dict,
     is_train: bool = True,
     env_kwargs: dict = None,
+    rng: np.random.RandomState | None = None,
 ):
     """Mirror *build_sokoban_envs* so higher‑level code can swap seamlessly."""
     return WebshopMultiProcessEnv(
@@ -254,4 +326,5 @@ def build_webshop_envs(
         resources_per_worker=resources_per_worker,
         is_train=is_train,
         env_kwargs=env_kwargs,
+        rng=rng,
     )

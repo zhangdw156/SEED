@@ -16,7 +16,7 @@ Step 1: Prepare dataset
 .. code:: python
 
     # it will be saved in the $HOME/data/geo3k folder
-    python examples/data_preprocess/geo3k.py
+    # Generic multimodal preprocessing is not shipped on exp/iclr.
 
 Step 2: Download Model
 ----------------------
@@ -32,8 +32,7 @@ Step 3: Perform GRPO training with multi-modal model on Geo3K Dataset
 .. code:: bash
 
     # run the task
-    bash examples/grpo_trainer/run_qwen2_5_vl-7b.sh
-
+    # Generic multimodal launchers are not shipped on exp/iclr.
 
 
 

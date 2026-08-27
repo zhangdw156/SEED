@@ -122,134 +122,21 @@ pip3 install vllm==0.8.2
 ```
 
 
-#### 3. Search-Based QA
-
-```bash
-cd ./agent_system/environments/env_package/search/third_party
-pip install -e .
-pip install gym==0.26.2
-```
-
-Prepare the Search-R1 style dataset:
-
-```bash
-cd repo_root/
-python examples/data_preprocess/preprocess_search_r1_dataset.py
-```
-
-The processed data is saved under `~/data/searchR1_processed_direct` by default.
-
-Build a separate retrieval environment for the local search server:
-
-```bash
-conda create -n retriever python=3.10 -y
-conda activate retriever
-
-conda install numpy==1.26.4
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-pip install transformers datasets pyserini huggingface_hub
-conda install faiss-gpu==1.8.0 -c pytorch -c nvidia -y
-pip install uvicorn fastapi
-```
-
-Download the index:
-
-```bash
-conda activate retriever
-
-local_dir=~/data/searchR1
-python examples/search/searchr1_download.py --local_dir $local_dir
-cat $local_dir/part_* > $local_dir/e5_Flat.index
-gzip -d $local_dir/wiki-18.jsonl.gz
-```
-
-Start the local flat e5 retrieval server:
-
-```bash
-conda activate retriever
-
-bash examples/search/retriever/retrieval_launch.sh > retrieval_server.log
-```
-
 ## Training
 
-The training and data-construction scripts load environment variables from the
-repo-level `.env` file by default. Put model paths, analyzer endpoints, and
-optional logging keys there before running the scripts:
+The `exp/iclr` branch evaluates **SEED without SFT**. Every run starts directly
+from the corresponding original Qwen2.5 Instruct checkpoint while retaining
+SEED's online hindsight analysis, teacher rescoring, and OPD update.
 
 ```bash
-# Runtime devices and logging.
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-WANDB_MODE=offline
-
-# Local model and data roots.
-MODELS_ROOT=/path/to/models # the parent dir of models
-DATA_ROOT=/path/to/data-root # used for search-qa data
-
-# Used by Stage 1 hindsight-skill annotation.
-OPENAI_API_KEY=your_key_here
-OPENAI_BASE_URL=https://your-openai-compatible-endpoint/v1
-OPENAI_MODEL=glm-5.2
-OPENAI_API_RETRIES=5
-OPENAI_API_RETRY_DELAY=1.0
+bash examples/seed_trainer_1.5b/run_alfworld.sh
+bash examples/seed_trainer_3b/run_webshop.sh
+bash examples/seed_trainer_7b/run_alfworld.sh
 ```
 
-
-
-### Stage 1: Build Hindsight-Skill SFT Checkpoints
-
-The paper-style workflow first builds episode-level skill SFT data and trains an
-analyzer-capable policy checkpoint.
-
-```bash
-# ALFWorld
-bash scripts/sft/alfworld/prepare_data.sh
-bash scripts/sft/alfworld/train_sft.sh
-
-# WebShop
-bash scripts/sft/webshop/prepare_data.sh
-bash scripts/sft/webshop/train_sft.sh
-
-# Search-based QA
-bash scripts/sft/search/prepare_data.sh
-bash scripts/sft/search/train_sft.sh
-
-# EZPoints
-bash scripts/sft/ezpoints/prepare_data.sh
-bash scripts/sft/ezpoints/train_sft.sh
-
-# Sokoban
-bash scripts/sft/sokoban/prepare_data.sh
-bash scripts/sft/sokoban/train_sft.sh
-```
-
-The default scale follows the paper: 180 tasks and 8 rollouts per task. The SFT
-scripts train for 3 epochs and export Hugging Face checkpoints under
-`$MODELS_ROOT`. All five datasets use the same
-`prepare_data.sh` / `train_sft.sh` interface; see
-[`scripts/sft/README.md`](scripts/sft/README.md) for defaults and overrides.
-
-### Stage 2: Run Self-Evolving OPD RL
-
-All SEED RL scripts live under `examples/seed_trainer/` and assume the repo root
-as the working directory.
-
-```bash
-bash examples/seed_trainer/run_alfworld_sft_glm_self.sh
-bash examples/seed_trainer/run_webshop_sft_glm_self.sh
-bash examples/seed_trainer/run_search_sft_glm_self.sh
-```
-
-Other teacher-self SFT entrypoints use the same naming convention:
-
-```bash
-bash examples/seed_trainer/run_alfworld_sft_qwen_self.sh
-bash examples/seed_trainer/run_ezpoints_sft_gemini_self.sh
-bash examples/seed_trainer/run_sokoban_sft_gemini_self.sh
-```
-
-
-
+The six standalone launchers cover Qwen2.5 1.5B, 3B, and 7B on ALFWorld and
+WebShop under the canonical fairness and shared ICLR training contract. See
+`examples/README.md` for runtime paths and exact hyperparameters.
 
 ## Merge Checkpoints
 

@@ -38,14 +38,13 @@ hindsight skill 则能指出“成功 workflow”“关键观察”“失败规�
 
 ## 2. 当前代码路径说明
 
-当前仓库保留论文使用的 SFT + self-evolving OPD 主路径：
+论文包含 SFT 初始化，但当前 `exp/iclr` 分支专门评估 **SEED w/o SFT**：
 
 | 路径 | 典型脚本 | 说明 |
 | --- | --- | --- |
-| 论文主路径 | `examples/seed_trainer/run_*_sft*.sh` | 从 hindsight-skill SFT checkpoint 初始化 policy 和 `policy_vllm` analyzer，用 `opd_loss_coef` 启用 gated OPD loss |
+| 当前公平实验 | `examples/seed_trainer_{1.5b,3b,7b}/run_{alfworld,webshop}.sh` | 从原始 Qwen2.5 Instruct 初始化，在线执行 hindsight analysis、teacher re-score 和 gated OPD update |
 
-启动脚本名已省略历史字段 `episode_no_skill_loss`。它表示默认不启用额外的
-skill-generation LM auxiliary loss，并不表示关闭论文式 OPD loss；OPD 仍通过
+六个入口不生成、训练或引用 SFT checkpoint，也不激活 SFT 环境。OPD 仍通过
 `actor_rollout_ref.actor.opd_loss_coef=0.01` 启用。
 
 ## 3. Stage 1: Hindsight Skill SFT
@@ -92,29 +91,7 @@ $$
 SFT 后的 checkpoint 既作为后续 RL actor，也作为后续同步 trajectory analyzer
 的初始化。
 
-对应脚本：
-
-```bash
-# ALFWorld
-bash scripts/sft/alfworld/prepare_data.sh
-bash scripts/sft/alfworld/train_sft.sh
-
-# WebShop
-bash scripts/sft/webshop/prepare_data.sh
-bash scripts/sft/webshop/train_sft.sh
-
-# Search-based QA
-bash scripts/sft/search/prepare_data.sh
-bash scripts/sft/search/train_sft.sh
-
-# EZPoints
-bash scripts/sft/ezpoints/prepare_data.sh
-bash scripts/sft/ezpoints/train_sft.sh
-
-# Sokoban
-bash scripts/sft/sokoban/prepare_data.sh
-bash scripts/sft/sokoban/train_sft.sh
-```
+本节仅记录论文方法背景；`exp/iclr` 不提供或调用 Stage-1 SFT 脚本。
 
 ## 4. Stage 2: Self-Evolving OPD
 
@@ -380,12 +357,7 @@ on-policy skill。
 
 | 功能 | 主要实现位置 |
 | --- | --- |
-| SFT 数据构建：ALFWorld | [`scripts/sft/alfworld`](../../scripts/sft/alfworld) |
-| SFT 数据构建：WebShop | [`scripts/sft/webshop`](../../scripts/sft/webshop) |
-| SFT 数据构建：Search-QA | [`scripts/sft/search`](../../scripts/sft/search) |
-| SFT 数据构建：EZPoints | [`scripts/sft/ezpoints`](../../scripts/sft/ezpoints) |
-| SFT 数据构建：Sokoban | [`scripts/sft/sokoban`](../../scripts/sft/sokoban) |
-| SFT 训练 | [`verl/trainer/fsdp_sft_trainer.py`](../../verl/trainer/fsdp_sft_trainer.py) |
+| w/o SFT 公平入口 | [`examples/README.md`](../../examples/README.md) |
 | 多步 rollout | [`agent_system/multi_turn_rollout/rollout_loop.py`](../../agent_system/multi_turn_rollout/rollout_loop.py) |
 | SEED 训练器集成 | [`verl/trainer/ppo/ray_trainer.py`](../../verl/trainer/ppo/ray_trainer.py) |
 | 轨迹分析 prompt 与 JSON 解析 | [`seed/analysis.py`](../../seed/analysis.py) |
@@ -414,11 +386,10 @@ auxiliary OPD loss，这些 teacher-advantage 权重会被忽略或置为 0。
 
 因此：
 
-- 复现实验和论文主线时，使用 SFT checkpoint + `policy_vllm` analyzer +
-  `opd_loss_coef=0.01`；
-- 做直接 ablation 或快速实验时，在对应的 `run_*_sft*.sh` 上通过环境变量或
-  Hydra 参数覆盖 analyzer、loss 和 teacher-advantage 配置，不再维护独立的
-  legacy 启动脚本。
+- 当前分支固定从原始 Qwen2.5 Instruct checkpoint 开始，并使用
+  `policy_vllm` analyzer + `opd_loss_coef=0.01`；
+- 所有实验通过六个 standalone launcher 的环境变量或末尾 Hydra override
+  调整，不维护 SFT launcher。
 
 ## 13. 结论
 

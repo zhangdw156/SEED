@@ -177,7 +177,8 @@ def get_product_per_page(top_n_products, page):
     return top_n_products[(page - 1) * PRODUCT_WINDOW:page * PRODUCT_WINDOW]
 
 
-def generate_product_prices(all_products):
+def generate_product_prices(all_products, rng=None):
+    rng = random if rng is None else rng
     product_prices = dict()
     for product in all_products:
         asin = product['asin']
@@ -187,7 +188,7 @@ def generate_product_prices(all_products):
         elif len(pricing) == 1:
             price = pricing[0]
         else:
-            price = random.uniform(*pricing[:2])
+            price = rng.uniform(*pricing[:2])
         product_prices[asin] = price
     return product_prices
 
@@ -227,7 +228,7 @@ def clean_product_keys(products):
     return products
 
 
-def load_products(filepath, num_products=None, human_goals=True):
+def load_products(filepath, num_products=None, human_goals=True, rng=None):
     # TODO: move to preprocessing step -> enforce single source of truth
     with open(filepath) as f:
         products = json.load(f)
@@ -358,5 +359,5 @@ def load_products(filepath, num_products=None, human_goals=True):
             attribute_to_asins[a].add(p['asin'])
 
     product_item_dict = {p['asin']: p for p in all_products}
-    product_prices = generate_product_prices(all_products)
+    product_prices = generate_product_prices(all_products, rng=rng)
     return all_products, product_item_dict, product_prices, attribute_to_asins
