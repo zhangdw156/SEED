@@ -219,12 +219,21 @@ class WebshopMultiProcessEnv(gym.Env):
             raise ValueError(
                 f'Expected {self.num_processes} actions, got {len(actions)}',
             )
+        return self.step_selected(actions, list(range(self.num_processes)))
 
-        # Send step commands to all workers
-        futures = []
-        for worker, action in zip(self._workers, actions):
-            future = worker.step.remote(action)
-            futures.append(future)
+    def step_selected(self, actions: list[str], indices: list[int]):
+        if len(actions) != len(indices):
+            raise ValueError(
+                f'Expected one action per selected environment, got '
+                f'{len(actions)} actions for {len(indices)} environments',
+            )
+        if any(index < 0 or index >= self.num_processes for index in indices):
+            raise ValueError('Selected environment index is out of range')
+
+        futures = [
+            self._workers[index].step.remote(action)
+            for action, index in zip(actions, indices)
+        ]
 
         # Collect results
         results = ray.get(futures)

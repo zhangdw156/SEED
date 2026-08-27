@@ -17,7 +17,6 @@ import logging
 import os
 import time
 from collections import OrderedDict
-from typing import List
 
 import torch
 from peft import PeftModel
@@ -51,6 +50,8 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
 class FSDPVLLMShardingManager(BaseShardingManager):
+    supports_rollout_session = True
+
     @check_cuda_is_available()
     def __init__(
         self,
@@ -107,12 +108,173 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             self.gen_random_states = None
 
         self.base_sync_done: bool = 'dummy' not in load_format
+        self._enter_actor_params_loaded = False
+        self._enter_rollout_awake = False
+        self._enter_rng_switch_attempted = False
+        self._enter_rng_switched = False
+        self._enter_train_mode_restore_needed = False
+        self._enter_cache_cleanup_needed = False
+        self._enter_succeeded = False
+        self._tainted = False
+        self._taint_reason = None
         if is_version_ge(pkg='vllm', minver='0.7.3'):
             VLLMHijack.hijack()
 
-    @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
+    @staticmethod
+    def _format_cleanup_failure(cleanup_error, action):
+        try:
+            return f"FSDP-vLLM cleanup failed during {action}: {cleanup_error!r}"
+        except BaseException:
+            return f"FSDP-vLLM cleanup failed during {action}"
+
+    @staticmethod
+    def _add_error_note(error, note):
+        if hasattr(error, "add_note"):
+            try:
+                error.add_note(note)
+            except BaseException:
+                pass
+
+    def _record_cleanup_failure(self, original_error, cleanup_error, action):
+        note = self._format_cleanup_failure(cleanup_error, action)
+        self._tainted = True
+        if self._taint_reason is None:
+            self._taint_reason = note
+        self._add_error_note(original_error, note)
+        try:
+            logger.error(
+                note,
+                exc_info=(
+                    type(cleanup_error),
+                    cleanup_error,
+                    cleanup_error.__traceback__,
+                ),
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _rng_states_equal(current_state, expected_state):
+        if isinstance(current_state, torch.Tensor) and isinstance(
+            expected_state,
+            torch.Tensor,
+        ):
+            return torch.equal(current_state, expected_state)
+        return bool(current_state == expected_state)
+
+    def _resolve_failed_rng_switch(self, switch_error):
+        try:
+            current_state = get_torch_device().get_rng_state()
+            unchanged = self._rng_states_equal(
+                current_state,
+                self.torch_random_states,
+            )
+        except BaseException as inspection_error:
+            self._record_cleanup_failure(
+                switch_error,
+                inspection_error,
+                "RNG state inspection after failed switch",
+            )
+            return
+
+        self._enter_rng_switch_attempted = False
+        self._enter_rng_switched = not unchanged
+
+    def _cleanup_enter_state(self, original_error=None):
+        cleanup_error = original_error
+        cleanup_failed = False
+
+        def run_cleanup(action, cleanup_fn):
+            nonlocal cleanup_error, cleanup_failed
+            try:
+                cleanup_fn()
+            except BaseException as error:
+                cleanup_failed = True
+                if cleanup_error is None:
+                    cleanup_error = error
+                self._record_cleanup_failure(
+                    cleanup_error,
+                    error,
+                    action,
+                )
+                return False
+            return True
+
+        if self._enter_rng_switch_attempted or self._enter_rng_switched:
+            def restore_rng():
+                if self._enter_succeeded:
+                    self.gen_random_states = get_torch_device().get_rng_state()
+                get_torch_device().set_rng_state(self.torch_random_states)
+
+            if run_cleanup("RNG restoration", restore_rng):
+                self._enter_rng_switch_attempted = False
+                self._enter_rng_switched = False
+
+        if self._enter_rollout_awake:
+            if vllm_version in ("0.5.4", "0.6.3"):
+                rollout_cleaned = run_cleanup(
+                    "rollout weight offload",
+                    self.inference_engine.offload_model_weights,
+                )
+            else:
+                rollout_cleaned = run_cleanup(
+                    "rollout sleep",
+                    lambda: self.inference_engine.sleep(level=1),
+                )
+            if rollout_cleaned:
+                self._enter_rollout_awake = False
+
+        if self._enter_actor_params_loaded:
+            if run_cleanup(
+                "actor parameter offload",
+                lambda: offload_fsdp_model_to_cpu(self.module),
+            ):
+                self._enter_actor_params_loaded = False
+
+        if self._enter_train_mode_restore_needed:
+            if run_cleanup("actor train mode restoration", self.module.train):
+                self._enter_train_mode_restore_needed = False
+
+        if self._enter_cache_cleanup_needed:
+            if run_cleanup(
+                "device cache cleanup",
+                lambda: get_torch_device().empty_cache(),
+            ):
+                self._enter_cache_cleanup_needed = False
+
+        if not cleanup_failed:
+            self._enter_succeeded = False
+
+        if original_error is None and cleanup_error is not None:
+            raise cleanup_error
+
     def __enter__(self):
-        def __collect_lora_params()->OrderedDict:
+        if self._tainted:
+            raise RuntimeError(
+                f"FSDP-vLLM sharding manager is tainted: {self._taint_reason}"
+            )
+        if (
+            self._enter_succeeded
+            or self._enter_actor_params_loaded
+            or self._enter_rollout_awake
+            or self._enter_rng_switch_attempted
+            or self._enter_rng_switched
+            or self._enter_train_mode_restore_needed
+            or self._enter_cache_cleanup_needed
+        ):
+            raise RuntimeError("FSDP-vLLM sharding manager is already entered")
+
+        self._enter_cache_cleanup_needed = True
+        try:
+            self._enter_impl()
+        except BaseException as enter_error:
+            self._cleanup_enter_state(original_error=enter_error)
+            raise
+        self._enter_succeeded = True
+
+    @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
+    def _enter_impl(self):
+        def __collect_lora_params():
             """
             collect lora params or full params if base model is not ready in vllm
             work with if isinstance(self.module._fsdp_wrapped_module, PeftModel)
@@ -165,9 +327,11 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         # pytorch: https://pytorch.org/docs/stable/notes/cuda.html#memory-management
         # vllm: https://github.com/vllm-project/vllm/blob/v0.7.3/vllm/device_allocator/cumem.py#L103
         get_torch_device().empty_cache()
+        self._enter_train_mode_restore_needed = True
 
         log_gpu_memory_usage("Before state_dict() in sharding manager memory", logger=logger)
         if self.offload_param:
+            self._enter_actor_params_loaded = True
             load_fsdp_model_to_gpu(self.module)
 
         peft_config = None
@@ -185,10 +349,12 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             "0.5.4",
             "0.6.3",
         ):
+            self._enter_rollout_awake = True
             self.inference_engine.sync_model_weights(params, load_format=load_format)
             log_gpu_memory_usage("After sync model weights in sharding manager", logger=logger)
             del params
         else:
+            self._enter_rollout_awake = True
             if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
                 self.inference_engine.wake_up(tags=["weights"])
             else:
@@ -200,6 +366,7 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             del params
             if self.offload_param:
                 offload_fsdp_model_to_cpu(self.module)
+                self._enter_actor_params_loaded = False
             get_torch_device().empty_cache()
 
             if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
@@ -210,28 +377,19 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         # important: need to manually set the random states of each tp to be identical.
         if self.device_mesh is not None:
             self.torch_random_states = get_torch_device().get_rng_state()
-            get_torch_device().set_rng_state(self.gen_random_states)
+            self._enter_rng_switch_attempted = True
+            try:
+                get_torch_device().set_rng_state(self.gen_random_states)
+            except BaseException as switch_error:
+                self._resolve_failed_rng_switch(switch_error)
+                raise
+            self._enter_rng_switch_attempted = False
+            self._enter_rng_switched = True
 
-    @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
-        # TODO(ZSL): check this
-        if vllm_version in (
-            "0.5.4",
-            "0.6.3",
-        ):
-            self.inference_engine.offload_model_weights()
-        else:
-            self.inference_engine.sleep(level=1)
-
-        self.module.train()
-
-        # add empty cache after each compute
-        get_torch_device().empty_cache()
-
-        # restore random states
-        if self.device_mesh is not None:
-            self.gen_random_states = get_torch_device().get_rng_state()
-            get_torch_device().set_rng_state(self.torch_random_states)
+        if not self._enter_succeeded:
+            return
+        self._cleanup_enter_state()
 
     @GPUMemoryLogger(role="fsdp vllm sharding_manager", logger=logger)
     def preprocess_data(self, data: DataProto) -> DataProto:

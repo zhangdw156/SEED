@@ -55,6 +55,19 @@ class SimpleMemory(BaseMemory):
         for env_idx in range(self.batch_size):
             self._data[env_idx].append({k: record[k][env_idx] for k in self.keys})
 
+    def store_selected(self, indices: List[int], record: Dict[str, List[Any]]):
+        """Store one history row for each selected environment index."""
+        if self.keys is None:
+            self.keys = list(record.keys())
+        assert self.keys == list(record.keys())
+        assert all(len(record[key]) == len(indices) for key in self.keys)
+        assert self._data is not None
+
+        for record_idx, env_idx in enumerate(indices):
+            self._data[env_idx].append(
+                {key: record[key][record_idx] for key in self.keys}
+            )
+
     def fetch(
         self,
         history_length: int,

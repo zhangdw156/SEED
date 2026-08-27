@@ -154,12 +154,18 @@ class AlfworldEnvs(gym.Env):
     def step(self, actions):
         assert len(actions) == self.num_processes, \
             "The num of actions must be equal to the num of processes"
+        return self.step_selected(actions, list(range(self.num_processes)))
 
-        # Send step commands to all workers
-        futures = []
-        for i, worker in enumerate(self.workers):
-            future = worker.step.remote(actions[i])
-            futures.append(future)
+    def step_selected(self, actions, indices):
+        assert len(actions) == len(indices), \
+            "The num of actions must be equal to the num of selected processes"
+        assert all(0 <= index < self.num_processes for index in indices), \
+            "Selected process index is out of range"
+
+        futures = [
+            self.workers[index].step.remote(action)
+            for action, index in zip(actions, indices)
+        ]
 
         # Collect results
         text_obs_list = []
@@ -169,7 +175,7 @@ class AlfworldEnvs(gym.Env):
         info_list = []
 
         results = ray.get(futures)
-        for i, (obs, scores, dones, info) in enumerate(results):
+        for index, (obs, scores, dones, info) in zip(indices, results):
             for k in info.keys():
                 info[k] = info[k][0]
 
@@ -177,11 +183,11 @@ class AlfworldEnvs(gym.Env):
             dones_list.append(dones[0])
             info_list.append(info)
 
-            self.prev_admissible_commands[i] = info['admissible_commands']
+            self.prev_admissible_commands[index] = info['admissible_commands']
             rewards_list.append(compute_reward(info, self.multi_modal))
 
         if self.multi_modal:
-            image_obs_list = self.getobs()
+            image_obs_list = self.getobs_selected(indices)
         else:
             image_obs_list = None
 
@@ -229,6 +235,10 @@ class AlfworldEnvs(gym.Env):
 
         images = ray.get(futures)
         return images
+
+    def getobs_selected(self, indices):
+        futures = [self.workers[index].getobs.remote() for index in indices]
+        return ray.get(futures)
 
     @property
     def get_admissible_commands(self):

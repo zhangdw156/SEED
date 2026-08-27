@@ -16,7 +16,7 @@
 import os
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Callable, Dict, Iterator, List, Tuple, cast
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, cast
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -582,6 +582,50 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
         dones = to_numpy(dones)
 
         return next_observations, rewards, dones, infos
+
+    def step_selected(self, text_actions: List[str], indices: List[int]):
+        action_pools = [self.envs.get_admissible_commands[index] for index in indices]
+        actions, valids = self.projection_f(text_actions, action_pools)
+        text_obs, image_obs, rewards, dones, infos = self.envs.step_selected(
+            actions,
+            indices,
+        )
+
+        self.memory.store_selected(
+            indices,
+            {
+                'text_obs': [self.pre_text_obs[index] for index in indices],
+                'action': actions,
+            },
+        )
+        for index, next_text_obs in zip(indices, text_obs):
+            self.pre_text_obs[index] = next_text_obs
+
+        next_action_pools = [
+            self.envs.get_admissible_commands[index]
+            for index in indices
+        ]
+        full_text_obs = self.build_text_obs(
+            text_obs,
+            next_action_pools,
+            indices=indices,
+        )
+        for info, index in zip(infos, indices):
+            if info.get("extra.gamefile") is None:
+                info["extra.gamefile"] = self.gamefile[index]
+        for info_index, info in enumerate(infos):
+            info['is_action_valid'] = to_numpy(valids[info_index])
+
+        next_observations = {
+            'text': full_text_obs,
+            'text_base': full_text_obs,
+            'image': image_obs,
+            'anchor': text_obs,
+        }
+        rewards = to_numpy(rewards)
+        dones = to_numpy(dones)
+
+        return next_observations, rewards, dones, infos
     
     def extract_task(self, text_obs: List[str]):
         for obs in text_obs:
@@ -598,14 +642,18 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
         text_obs: List[str],
         admissible_actions: List[List[str]],
         init: bool = False,
-        history_length: int = None,
+        history_length: Optional[int] = None,
+        indices: Optional[List[int]] = None,
     ) -> List[str]:
         """
         This function builds the text observation for the agent.
         """
         postprocess_text_obs = []
-        memory_contexts = [""] * len(text_obs)
-        valid_lens = [0] * len(text_obs)
+        if indices is None:
+            indices = list(range(len(text_obs)))
+        context_size = max(indices, default=-1) + 1
+        memory_contexts = [""] * context_size
+        valid_lens = [0] * context_size
         effective_history_length = self.config.env.history_length if history_length is None else int(history_length)
         if not init and effective_history_length > 0:
             memory_contexts, valid_lens = self.memory.fetch(
@@ -613,7 +661,7 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
                     obs_key="text_obs",
                     action_key="action")
 
-        for i in range(len(text_obs)):
+        for i, env_idx in enumerate(indices):
             # exclude 'help' in admissible_actions[i]
             reformatted_admissible_actions = "\n ".join(f"'{s}'" for s in admissible_actions[i] if s != 'help')
 
@@ -622,21 +670,18 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
                            self.retrieved_memories is not None and
                            self._seed_use_with_memory)
 
-            step_count = 0 if init else len(self.memory[i])
-            current_step = 1 if init else len(self.memory[i]) + 1
-
             if use_retrieval:
                 # Format retrieved memories for prompt
                 memory_context = self.retrieval_memory.format_for_prompt(
-                    self.retrieved_memories[i]
+                    self.retrieved_memories[env_idx]
                 )
                 obs = ALFWORLD_TEMPLATE_WITH_MEMORY.format(
-                    task_description=self.tasks[i],
+                    task_description=self.tasks[env_idx],
                     retrieved_memories=memory_context,
-                    step_count=step_count,
-                    history_length=valid_lens[i],
-                    action_history=memory_contexts[i],
-                    current_step=current_step,
+                    step_count=0 if init else len(self.memory[env_idx]),
+                    history_length=valid_lens[env_idx],
+                    action_history=memory_contexts[env_idx],
+                    current_step=1 if init else len(self.memory[env_idx]) + 1,
                     current_observation=text_obs[i],
                     admissible_actions=reformatted_admissible_actions
                 )
@@ -647,11 +692,11 @@ class AlfWorldEnvironmentManager(EnvironmentManagerBase):
                 )
             else:
                 obs = ALFWORLD_TEMPLATE.format(
-                    task_description=self.tasks[i],
-                    step_count=step_count,
-                    history_length=valid_lens[i],
-                    action_history=memory_contexts[i],
-                    current_step=current_step,
+                    task_description=self.tasks[env_idx],
+                    step_count=0 if init else len(self.memory[env_idx]),
+                    history_length=valid_lens[env_idx],
+                    action_history=memory_contexts[env_idx],
+                    current_step=1 if init else len(self.memory[env_idx]) + 1,
                     current_observation=text_obs[i],
                     admissible_actions=reformatted_admissible_actions
                 )
@@ -931,6 +976,40 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
 
         return next_observations, rewards, dones, infos
 
+    def step_selected(self, text_actions: List[str], indices: List[int]):
+        actions, valids = self.projection_f(text_actions)
+        next_obs, rewards, dones, infos = self.envs.step_selected(
+            actions,
+            indices,
+        )
+
+        next_obs = self.format_obs(next_obs, indices=indices)
+
+        self.memory.store_selected(
+            indices,
+            {
+                'text_obs': [self.pre_text_obs[index] for index in indices],
+                'action': actions,
+            },
+        )
+        for index, selected_obs in zip(indices, next_obs):
+            self.pre_text_obs[index] = selected_obs
+
+        full_text_obs = self.build_text_obs(next_obs, infos, indices=indices)
+        next_observations = {
+            'text': full_text_obs,
+            'text_base': full_text_obs,
+            'image': None,
+            'anchor': next_obs.copy(),
+        }
+        for info_index, info in enumerate(infos):
+            info['is_action_valid'] = to_numpy(valids[info_index])
+
+        rewards = to_numpy(rewards)
+        dones = to_numpy(dones)
+
+        return next_observations, rewards, dones, infos
+
     def extract_task(self, text_obs: List[str]):
         tasks = []
         for obs in text_obs:
@@ -939,15 +1018,18 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
             tasks.append(parts[2])
         return tasks
     
-    def format_obs(self, text_obs):
+    def format_obs(self, text_obs, indices: Optional[List[int]] = None):
         postprocess_text_obs = []
-        for i in range(len(text_obs)):
+        if indices is None:
+            indices = list(range(len(text_obs)))
+        assert len(text_obs) == len(indices)
+
+        for i, env_idx in enumerate(indices):
             parts = text_obs[i].split(" [SEP] ")
-            # the index of self.tasks[i] in parts
             try:
-                index = parts.index(self.tasks[i])
+                index = parts.index(self.tasks[env_idx])
                 reformatted_obs = " [SEP] ".join(f"'{p}'" for p in parts[index+1:])
-            except:
+            except ValueError:
                 reformatted_obs = text_obs[i]
 
             postprocess_text_obs.append(reformatted_obs)
@@ -969,13 +1051,22 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
 
         return actions
             
-    def build_text_obs(self, text_obs: List[str], infos: List[List[str]], init: bool = False) -> List[str]:
+    def build_text_obs(
+        self,
+        text_obs: List[str],
+        infos: List[List[str]],
+        init: bool = False,
+        indices: Optional[List[int]] = None,
+    ) -> List[str]:
         """
         This function builds the text observation for the agent.
         """
         postprocess_text_obs = []
-        memory_contexts = [""] * len(text_obs)
-        valid_lens = [0] * len(text_obs)
+        if indices is None:
+            indices = list(range(len(text_obs)))
+        context_size = max(indices, default=-1) + 1
+        memory_contexts = [""] * context_size
+        valid_lens = [0] * context_size
         if not init and self.config.env.history_length > 0:
             memory_contexts, valid_lens = self.memory.fetch(
                     self.config.env.history_length,
@@ -988,39 +1079,41 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
             and self._seed_use_with_memory
         )
 
-        for i in range(len(text_obs)):
+        assert len(text_obs) == len(indices)
+
+        for i, env_idx in enumerate(indices):
 
             available_actions = self.format_avail_actions(infos[i]['available_actions'])
             reformatted_available_actions = "\n".join(f"'{s}'," for s in available_actions)
-            step_count = 0 if init else len(self.memory[i])
-            current_step = 1 if init else len(self.memory[i]) + 1
+            step_count = 0 if init else len(self.memory[env_idx])
+            current_step = 1 if init else len(self.memory[env_idx]) + 1
 
             if use_retrieval:
                 memory_context = self.retrieval_memory.format_for_prompt(
-                    self.retrieved_memories[i]
+                    self.retrieved_memories[env_idx]
                 )
                 obs = WEBSHOP_TEMPLATE_WITH_MEMORY.format(
-                    task_description=self.tasks[i],
+                    task_description=self.tasks[env_idx],
                     retrieved_memories=memory_context,
                     step_count=step_count,
-                    history_length=valid_lens[i],
-                    action_history=memory_contexts[i],
+                    history_length=valid_lens[env_idx],
+                    action_history=memory_contexts[env_idx],
                     current_step=current_step,
                     current_observation=text_obs[i],
                     available_actions=reformatted_available_actions
                 )
             elif init or self.config.env.history_length <= 0:
                 obs = WEBSHOP_TEMPLATE_NO_HIS.format(
-                    task_description=self.tasks[i],
+                    task_description=self.tasks[env_idx],
                     current_observation=text_obs[i],
                     available_actions=reformatted_available_actions
                 )
             else:
                 obs = WEBSHOP_TEMPLATE.format(
-                    task_description=self.tasks[i],
+                    task_description=self.tasks[env_idx],
                     step_count=step_count,
-                    history_length=valid_lens[i],
-                    action_history=memory_contexts[i],
+                    history_length=valid_lens[env_idx],
+                    action_history=memory_contexts[env_idx],
                     current_step=current_step,
                     current_observation=text_obs[i],
                     available_actions=reformatted_available_actions
@@ -1028,7 +1121,7 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
             if len(obs) > 20000:
                 print(f"Warning len(obs)={len(obs)} is too long")
                 obs = WEBSHOP_TEMPLATE_NO_HIS.format(
-                    task_description=self.tasks[i],
+                    task_description=self.tasks[env_idx],
                     current_observation=text_obs[i],
                     available_actions=reformatted_available_actions
                 )
