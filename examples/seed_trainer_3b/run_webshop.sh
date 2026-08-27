@@ -65,6 +65,5 @@ args=(
   trainer.val_before_train=true
 )
 if [[ "${LAUNCHER_DRY_RUN:-false}" == true ]]; then printf '%s\n' "${args[@]}" "$@"; exit 0; fi
-bash "${REPO_ROOT}/scripts/bootstrap_webshop_data.sh"
 "${PYTHON_BIN}" -m examples.data_preprocess.prepare --mode text --local_dir "${DATA_ROOT}" --train_data_size 16 --val_data_size 128
 exec "${PYTHON_BIN}" -m verl.trainer.main_ppo "${args[@]}" "$@"

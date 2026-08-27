@@ -121,19 +121,6 @@ pip3 install -e .
 pip3 install vllm==0.8.2
 ```
 
-On H20 machines, the WebShop launchers reuse the prepared assets from
-`/data/zhangdw12/work/verl-agent/agent_system/environments/env_package/webshop/webshop`
-by default. After activating the intended mamba environment, run any
-`examples/seed_trainer_{1.5b,3b,7b}/run_webshop.sh` directly. If a required
-repository-local data file or `search_engine/indexes` is absent, the launcher
-creates an idempotent symbolic link to the shared copy; existing local paths
-are never replaced. Concurrent first launches are serialized, failed attempts
-roll back their new links, and the bootstrap verifies non-empty JSON files plus
-a usable Lucene index. Override the prepared checkout with
-`WEBSHOP_SHARED_ROOT=/path/to/webshop`. If the shared assets are unavailable,
-the launcher exits before preprocessing or training and points to `setup.sh`.
-`LAUNCHER_DRY_RUN=true` never creates these links.
-
 
 ## Training
 
