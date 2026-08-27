@@ -8,8 +8,9 @@ fi
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 WEBSHOP_SHARED_ROOT="${WEBSHOP_SHARED_ROOT:-/data/zhangdw12/work/verl-agent/agent_system/environments/env_package/webshop/webshop}"
 WEBSHOP_LOCAL_ROOT="${WEBSHOP_LOCAL_ROOT:-${REPO_ROOT}/agent_system/environments/env_package/webshop/webshop}"
-LOCK_DIR="${WEBSHOP_LOCAL_ROOT}.bootstrap.lock"
-LOCK_HELD=0
+LOCK_FILE="${WEBSHOP_LOCAL_ROOT}.bootstrap.lock"
+LOCK_DIR="${WEBSHOP_LOCAL_ROOT}.bootstrap.lock.d"
+LOCK_KIND=""
 CREATED_PATHS=()
 CREATED_SOURCES=()
 ASSETS=(
@@ -33,7 +34,7 @@ cleanup() {
       fi
     done
   fi
-  if (( LOCK_HELD )); then
+  if [[ "${LOCK_KIND}" == "mkdir" ]]; then
     rm -f "${LOCK_DIR}/pid"
     rmdir "${LOCK_DIR}" 2>/dev/null || true
   fi
@@ -44,25 +45,29 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 acquire_lock() {
-  local attempt owner_pid
+  local attempt
 
   mkdir -p "$(dirname "${LOCK_DIR}")"
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"${LOCK_FILE}"
+    if ! flock -w 60 9; then
+      printf 'Timed out waiting for WebShop bootstrap lock: %s\n' "${LOCK_FILE}" >&2
+      return 1
+    fi
+    LOCK_KIND="flock"
+    return 0
+  fi
+
   for (( attempt=0; attempt < 600; attempt++ )); do
     if mkdir "${LOCK_DIR}" 2>/dev/null; then
       printf '%s\n' "$$" > "${LOCK_DIR}/pid"
-      LOCK_HELD=1
+      LOCK_KIND="mkdir"
       return 0
-    fi
-    if [[ -r "${LOCK_DIR}/pid" ]]; then
-      owner_pid="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
-      if [[ "${owner_pid}" =~ ^[0-9]+$ ]] && ! kill -0 "${owner_pid}" 2>/dev/null; then
-        rm -f "${LOCK_DIR}/pid"
-        rmdir "${LOCK_DIR}" 2>/dev/null || true
-      fi
     fi
     sleep 0.1
   done
   printf 'Timed out waiting for WebShop bootstrap lock: %s\n' "${LOCK_DIR}" >&2
+  printf 'Remove that directory only after confirming its recorded PID is no longer running.\n' >&2
   return 1
 }
 
