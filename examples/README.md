@@ -45,3 +45,10 @@ ALFWorld defaults to:
 WebShop uses `python3` from the current shell and never activates conda/mamba.
 Prepare and activate the intended mamba environment before launching. WebShop
 data and indexes remain under the bundled repository-local environment package.
+When any required local asset is missing, the launcher links it from
+`${WEBSHOP_SHARED_ROOT:-/data/zhangdw12/work/verl-agent/agent_system/environments/env_package/webshop/webshop}`.
+The bootstrap leaves existing local files, directories, and links untouched,
+serializes concurrent launchers, rolls back links from failed attempts, and
+validates non-empty data files plus a Lucene `segments_*` file. It fails before
+preprocessing when a required shared source is invalid or missing, and is
+skipped entirely by `LAUNCHER_DRY_RUN=true`.
