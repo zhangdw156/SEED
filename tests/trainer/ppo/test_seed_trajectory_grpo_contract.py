@@ -10,7 +10,12 @@ import torch
 from hydra import compose, initialize_config_dir
 
 from verl import DataProto
+from agent_system.multi_turn_rollout.utils import adjust_batch
 from verl.trainer.ppo import ray_trainer
+from verl.trainer.ppo.trajectory_grpo import (
+    NATIVE_TRAJECTORY_GRPO_CONFIG,
+    validate_trajectory_grpo_config,
+)
 
 ROOT = Path(__file__).parents[3]
 CONFIG_DIR = ROOT / "verl/trainer/config"
@@ -66,6 +71,70 @@ def test_seed_launcher_real_hydra_compose_and_validation(launcher):
     trainer._validate_config()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("scheduler", "trajectory"),
+        ("reducer", "trajectory_mean"),
+        ("advantage", "trajectory"),
+        ("penalty", "trajectory"),
+        ("filter", "penalty_aware"),
+    ],
+)
+def test_non_native_trajectory_grpo_fields_are_rejected(field, value):
+    config = dict(NATIVE_TRAJECTORY_GRPO_CONFIG)
+    config[field] = value
+
+    with pytest.raises(
+        ValueError,
+        match=rf"trajectory_grpo\.{field} must be",
+    ):
+        validate_trajectory_grpo_config(config)
+
+
+def test_native_adjustment_preserves_identity_without_trajectory_metadata():
+    config = _compose_launcher(LAUNCHERS[0])
+    config.trainer.n_gpus_per_node = 1
+    config.trainer.nnodes = 1
+    config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu = 2
+    config.actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu = 2
+    config.actor_rollout_ref.actor.use_kl_loss = False
+    config.algorithm.use_kl_in_reward = False
+
+    batch = DataProto.from_dict(
+        tensors={
+            "input_ids": torch.arange(12).reshape(3, 4),
+        },
+        non_tensors={
+            "uid": np.asarray(["group-0", "group-0", "group-1"], dtype=object),
+            "traj_uid": np.asarray(["traj-0", "traj-1", "traj-2"], dtype=object),
+        },
+    )
+    original_uid = batch.non_tensor_batch["uid"].copy()
+    original_traj_uid = batch.non_tensor_batch["traj_uid"].copy()
+
+    np.random.seed(0)
+    adjusted = adjust_batch(config, batch, mode="copy", track_source_indices=True)
+
+    assert len(adjusted) == 4
+    assert "row_weights" not in adjusted.batch
+    assert "trajectory_id" not in adjusted.batch
+    np.testing.assert_array_equal(adjusted.non_tensor_batch["uid"][:3], original_uid)
+    np.testing.assert_array_equal(
+        adjusted.non_tensor_batch["traj_uid"][:3],
+        original_traj_uid,
+    )
+    source_indices = adjusted.non_tensor_batch["_batch_source_idx"]
+    np.testing.assert_array_equal(
+        adjusted.non_tensor_batch["uid"],
+        original_uid[source_indices],
+    )
+    np.testing.assert_array_equal(
+        adjusted.non_tensor_batch["traj_uid"],
+        original_traj_uid[source_indices],
+    )
+
+
 class _StopAfterActorUpdate(Exception):
     pass
 
@@ -88,6 +157,7 @@ class _ActorRolloutStub:
     def update_actor(self, batch):
         assert batch.meta_info["multi_turn"] is False
         assert torch.count_nonzero(batch.batch["advantages"]).item() > 0
+        assert torch.count_nonzero(batch.batch["returns"]).item() > 0
         raise _StopAfterActorUpdate
 
 
@@ -152,25 +222,12 @@ def test_fit_consumes_native_step_row_before_actor_update(monkeypatch):
         trainer,
     )
 
-    observed = []
-    original_trajectory_config = ray_trainer._trajectory_config
-
-    def recording_trajectory_config(value):
-        result = original_trajectory_config(value)
-        observed.append(result)
-        return result
-
     tracking_stub = types.ModuleType("verl.utils.tracking")
     tracking_stub_any = cast(Any, tracking_stub)
     tracking_stub_any.Tracking = type(
         "Tracking",
         (),
         {"__init__": lambda self, **_kwargs: None},
-    )
-    monkeypatch.setattr(
-        ray_trainer,
-        "_trajectory_config",
-        recording_trajectory_config,
     )
     monkeypatch.setattr(
         ray_trainer,
@@ -198,12 +255,3 @@ def test_fit_consumes_native_step_row_before_actor_update(monkeypatch):
 
     with pytest.raises(_StopAfterActorUpdate):
         trainer.fit()
-
-    assert observed
-    assert observed[-1] == {
-        "scheduler": "row",
-        "reducer": "token_mean",
-        "advantage": "step_row",
-        "penalty": "step_local",
-        "filter": "off",
-    }

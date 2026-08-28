@@ -82,21 +82,6 @@ WorkerType = Type[Worker]
 module_logger = logging.getLogger(__name__)
 
 
-def _trajectory_config(config) -> dict:
-    defaults = {
-        "scheduler": "row",
-        "reducer": "token_mean",
-        "advantage": "step_row",
-        "penalty": "step_local",
-        "filter": "off",
-    }
-    configured = OmegaConf.to_container(
-        config.algorithm.get("trajectory_grpo", {}),
-        resolve=True,
-    )
-    return {**defaults, **(configured or {})}
-
-
 def _sanitize_json_value(value: Any) -> Any:
     """Return a JSON-serializable value that is safe to write as UTF-8."""
     if isinstance(value, str):
@@ -1038,23 +1023,6 @@ class RayPPOTrainer:
         validate_trajectory_grpo_config(
             OmegaConf.to_container(config, resolve=True)
         )
-        trajectory_config = _trajectory_config(config)
-        if (
-            trajectory_config["advantage"] != "step_row"
-            and config.algorithm.adv_estimator != AdvantageEstimator.GRPO
-        ):
-            raise ValueError(
-                "trajectory-level advantage currently requires "
-                "algorithm.adv_estimator=grpo"
-            )
-        if (
-            trajectory_config["scheduler"] != "row"
-            and config.algorithm.adv_estimator != AdvantageEstimator.GRPO
-        ):
-            raise ValueError(
-                "SEED and GiGPO preserve their official update path with "
-                "algorithm.trajectory_grpo.scheduler=row"
-            )
         # number of GPUs total
         n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
         opd_stop_after_steps = OmegaConf.select(config, "algorithm.seed.opd_stop_after_steps")
@@ -3264,7 +3232,6 @@ class RayPPOTrainer:
                                 )
                                 seed_teacher_snapshot = None
                     
-                    trajectory_config = _trajectory_config(self.config)
                     batch = adjust_batch(
                         self.config,
                         batch,
@@ -3272,18 +3239,10 @@ class RayPPOTrainer:
                     )
 
                     batch.batch["response_mask"] = compute_response_mask(batch)
-                    if "row_weights" in batch.batch:
-                        batch.batch["response_mask"] = (
-                            batch.batch["response_mask"]
-                            * batch.batch["row_weights"].unsqueeze(-1)
-                        )
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
                     # Please take care when you implement group based adv computation such as GRPO and rloo
-                    if (
-                        self.config.trainer.balance_batch
-                        and trajectory_config["scheduler"] == "row"
-                    ):
+                    if self.config.trainer.balance_batch:
                         self._balance_batch(batch, metrics=metrics)
 
                     # compute global_valid tokens
@@ -3412,7 +3371,6 @@ class RayPPOTrainer:
                                 'use_invalid_action_penalty',
                                 True,
                             )
-                            and trajectory_config["penalty"] == "step_local"
                         ):
                             batch, invalid_metrics = apply_invalid_action_penalty(batch,
                                                                                   invalid_action_penalty_coef=self.config.actor_rollout_ref.actor.invalid_action_penalty_coef,
@@ -3446,11 +3404,6 @@ class RayPPOTrainer:
                             episode_skill_teacher_advantage_w = 0.0
                             step_skill_teacher_advantage_w = 0.0
 
-                        if trajectory_config["advantage"] != "step_row":
-                            raise ValueError(
-                                "The SEED fairness launchers require "
-                                "algorithm.trajectory_grpo.advantage=step_row"
-                            )
                         batch = compute_advantage(
                             batch,
                             adv_estimator=self.config.algorithm.adv_estimator,

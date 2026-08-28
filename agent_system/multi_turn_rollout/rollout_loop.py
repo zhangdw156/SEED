@@ -30,10 +30,6 @@ from transformers import PreTrainedTokenizer
 from agent_system.multi_turn_rollout.utils import process_image, to_list_of_dict, torch_to_numpy, filter_group_data
 from agent_system.environments import EnvironmentManagerBase
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
-from verl.trainer.ppo.trajectory_grpo import (
-    require_filter_target_reached,
-    take_complete_uid_groups,
-)
 from omegaconf import OmegaConf
 
 
@@ -1238,14 +1234,6 @@ class TrajectoryCollector:
             self.config.data.train_batch_size
             * self.config.env.rollout.n
         )
-        filter_mode = str(
-            self.config.algorithm.get("trajectory_grpo", {}).get(
-                "filter",
-                "off",
-            )
-        ).replace("-", "_")
-        penalty_aware = filter_mode == "penalty_aware"
-
         while len(total_batch_list) < target_trajectories and try_count < max_try_count:
 
             if len(total_batch_list) > 0:
@@ -1268,39 +1256,12 @@ class TrajectoryCollector:
                                                                                                 last_try=(try_count == max_try_count),
                                                                                                 )
 
-            remaining = target_trajectories - len(total_batch_list)
-            if penalty_aware and len(batch_list) > remaining:
-                accepted_indices = take_complete_uid_groups(
-                    [trajectory[0]["uid"] for trajectory in batch_list],
-                    remaining,
-                )
-                batch_list = [
-                    batch_list[index]
-                    for index in accepted_indices
-                ]
-                episode_rewards = episode_rewards[accepted_indices]
-                episode_lengths = episode_lengths[accepted_indices]
-                success = {
-                    key: value[accepted_indices]
-                    for key, value in success.items()
-                    if len(value) == len(traj_uid)
-                }
-                traj_uid = traj_uid[accepted_indices]
-                tool_callings = tool_callings[accepted_indices]
-
             total_batch_list += batch_list
             total_episode_rewards.append(episode_rewards)
             total_episode_lengths.append(episode_lengths)
             total_success.append(success)
             total_traj_uid.append(traj_uid)
             total_tool_callings.append(tool_callings)
-
-        if penalty_aware:
-            require_filter_target_reached(
-                len(total_batch_list),
-                target_trajectories,
-                max_try_count,
-            )
 
         total_episode_rewards = np.concatenate(total_episode_rewards, axis=0)
         total_episode_lengths = np.concatenate(total_episode_lengths, axis=0)
@@ -1332,16 +1293,7 @@ class TrajectoryCollector:
         if is_train:
             gen_batch = gen_batch.repeat(repeat_times=self.config.env.rollout.n, interleave=True)
 
-        filter_mode = str(
-            self.config.algorithm.get("trajectory_grpo", {}).get(
-                "filter",
-                "off",
-            )
-        ).replace("-", "_")
-        if (
-            self.config.algorithm.filter_groups.enable
-            or filter_mode == "penalty_aware"
-        ) and is_train:
+        if self.config.algorithm.filter_groups.enable and is_train:
             total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
                 self.dynamic_multi_turn_loop(
                 gen_batch=gen_batch,
