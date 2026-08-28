@@ -21,6 +21,14 @@ ROOT = Path(__file__).parents[2]
 EXAMPLES = ROOT / "examples"
 SIZES = ("1.5b", "3b", "7b")
 BENCHMARKS = ("alfworld", "webshop")
+MEMORY_CONTRACTS = {
+    ("1.5b", "alfworld"): ("32", "32"),
+    ("3b", "alfworld"): ("16", "16"),
+    ("7b", "alfworld"): ("4", "4"),
+    ("1.5b", "webshop"): ("8", "16"),
+    ("3b", "webshop"): ("4", "8"),
+    ("7b", "webshop"): ("4", "4"),
+}
 
 
 def _write_jsonl(path, rows):
@@ -187,4 +195,19 @@ def test_launcher_dry_run_resolves_size_and_keeps_cli_override_last(
     lines = result.stdout.splitlines()
     assert f"actor_rollout_ref.model.path=/data/zhangdw12/models/{expected_model}" in lines
     assert f"actor_rollout_ref.rollout.tensor_model_parallel_size={expected_tp}" in lines
+    actor_micro_batch, logprob_micro_batch = MEMORY_CONTRACTS[
+        (size, benchmark)
+    ]
+    assert (
+        "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="
+        f"{actor_micro_batch}"
+    ) in lines
+    assert (
+        "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="
+        f"{logprob_micro_batch}"
+    ) in lines
+    assert (
+        "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="
+        f"{logprob_micro_batch}"
+    ) in lines
     assert lines[-1] == "trainer.experiment_name=cli_override"
