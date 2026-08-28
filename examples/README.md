@@ -43,5 +43,9 @@ ALFWorld defaults to:
 - optional glibc shim under the same runtime root, loaded only when present
 
 WebShop uses `python3` from the current shell and never activates conda/mamba.
-Prepare and activate the intended mamba environment before launching. WebShop
-data and indexes remain under the bundled repository-local environment package.
+Prepare and activate the intended mamba environment before launching. On normal
+startup, missing WebShop data files and `search_engine/indexes` are linked to
+the prepared sibling `../verl-agent` checkout. The links themselves are always
+relative, so moving all five sibling repositories together preserves them.
+Existing local resources are not replaced. `WEBSHOP_SHARED_ROOT` can override
+the shared checkout when needed.
