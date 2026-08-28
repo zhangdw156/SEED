@@ -37,6 +37,7 @@ from vllm import SamplingParams
 
 from verl import DataProto
 from verl.utils.torch_functional import get_response_mask, pad_sequence_to_length
+from verl.workers.rollout.vllm_config import build_vllm_sampling_params_kwargs
 from verl.workers.rollout.vllm_rollout.vllm_rollout import vLLMRollout
 
 # TODO
@@ -75,9 +76,11 @@ class FIREvLLMRollout(vLLMRollout):
             if "top_k" not in kwargs_0 or kwargs_0["top_k"] <= 0:
                 kwargs_0["top_k"] = 16
             self.sampling_params.max_tokens = config.response_length - 1
-            for k in config.keys():
-                if hasattr(SamplingParams(), str(k)):
-                    kwargs_0[k] = config.get(k)
+            kwargs_0 = build_vllm_sampling_params_kwargs(
+                config,
+                SamplingParams,
+                **kwargs_0,
+            )
             self.sampling_params_0 = SamplingParams(**kwargs_0)
 
     @contextmanager

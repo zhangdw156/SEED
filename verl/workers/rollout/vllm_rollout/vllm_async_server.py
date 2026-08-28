@@ -32,6 +32,10 @@ from vllm.worker.worker_base import WorkerWrapperBase
 
 from verl.utils.fs import copy_to_local
 from verl.workers.rollout.async_server import AsyncServerBase
+from verl.workers.rollout.vllm_config import (
+    build_vllm_sampling_params_kwargs,
+    resolve_vllm_engine_seed,
+)
 
 logger = logging.getLogger(__file__)
 
@@ -151,14 +155,13 @@ class AsyncvLLMServer(AsyncServerBase):
 
         # Override default generation config from hugging face model config,
         # user can still override them by passing kwargs in each request.
-        kwargs = dict(
+        kwargs = build_vllm_sampling_params_kwargs(
+            config,
+            SamplingParams,
             n=1,
             logprobs=0,
             max_tokens=config.response_length,
         )
-        for k in config.keys():
-            if hasattr(SamplingParams(), str(k)):
-                kwargs[k] = config.get(k)
         print(f"override_generation_config: {kwargs}")
 
         engine_args = AsyncEngineArgs(
@@ -180,7 +183,10 @@ class AsyncvLLMServer(AsyncServerBase):
             enable_chunked_prefill=config.enable_chunked_prefill,
             enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
-            seed=self.vllm_dp_rank,
+            seed=resolve_vllm_engine_seed(
+                config,
+                offset=self.vllm_dp_rank,
+            ),
         )
 
         # init async llm engine

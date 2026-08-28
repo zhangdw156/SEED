@@ -35,19 +35,22 @@ from typing import Any, Dict, List, Union
 import numpy as np
 import torch
 import torch.distributed
-from omegaconf import DictConfig, OmegaConf, ListConfig
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from tensordict import TensorDict
 from vllm import LLM, SamplingParams
+from vllm.config import CompilationConfig
 from vllm.distributed import parallel_state as vllm_ps
+from vllm.lora.request import LoRARequest
 
 from verl import DataProto
 from verl.third_party.vllm import vllm_version
 from verl.utils.debug import GPUMemoryLogger
 from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.workers.rollout.base import BaseRollout
-
-from vllm.config import CompilationConfig, LoRAConfig
-from vllm.lora.request import LoRARequest
+from verl.workers.rollout.vllm_config import (
+    build_vllm_sampling_params_kwargs,
+    resolve_vllm_engine_seed,
+)
 
 try:
     # https://github.com/vllm-project/vllm/commit/96b9aa5aa076e64c68765232aec343e4d0006e2a
@@ -162,10 +165,6 @@ class vLLMRollout(BaseRollout):
         trust_remote_code = kwargs.get("trust_remote_code", False)
         load_format = "dummy" if config.load_format.startswith("dummy") else config.load_format
 
-        limit_mm_per_prompt = None
-        if config.get("limit_images", None):  # support for multi-image data
-            limit_mm_per_prompt = {"image": config.get("limit_images")}
-
         lora_kwargs = kwargs.pop('lora_kwargs', {})
         self.lora_kwargs = lora_kwargs
         # copy it to avoid secretly modifying the engine config
@@ -177,6 +176,7 @@ class vLLMRollout(BaseRollout):
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
+        engine_seed = resolve_vllm_engine_seed(config, engine_kwargs)
 
         compilation_config = {}
 
@@ -212,7 +212,7 @@ class vLLMRollout(BaseRollout):
             enable_chunked_prefill=config.enable_chunked_prefill,
             enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
-            seed=config.get("seed", 0),
+            seed=engine_seed,
             **compilation_config,
             **self.lora_kwargs,
             **engine_kwargs,
@@ -221,19 +221,14 @@ class vLLMRollout(BaseRollout):
         # Offload vllm model to reduce peak memory usage
         self.inference_engine.sleep(level=1)
 
-        kwargs = dict(
+        kwargs = build_vllm_sampling_params_kwargs(
+            config,
+            SamplingParams,
             n=1,
             logprobs=0,  # can be set to 0 and let actor to recompute
             max_tokens=config.response_length,
+            detokenize=False,
         )
-
-        # # we may detokenize the result all together later
-        kwargs["detokenize"] = False
-
-        # supporting adding any sampling params from the config file
-        for k in config.keys():
-            if hasattr(SamplingParams(), str(k)):
-                kwargs[k] = config.get(k)
 
         print(f"kwargs: {kwargs}")
         self.sampling_params = SamplingParams(**kwargs)

@@ -37,6 +37,7 @@ from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
 from torch import nn
 from vllm import SamplingParams
+from vllm.lora.request import LoRARequest
 
 from verl import DataProto
 from verl.third_party.vllm import LLM, vllm_version
@@ -44,10 +45,13 @@ from verl.third_party.vllm import parallel_state as vllm_ps
 from verl.utils.debug import GPUMemoryLogger
 from verl.utils.torch_functional import get_response_mask, pad_sequence_to_length
 from verl.workers.rollout.base import BaseRollout
+from verl.workers.rollout.vllm_config import (
+    build_vllm_sampling_params_kwargs,
+    resolve_vllm_engine_seed,
+)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
-from vllm.lora.request import LoRARequest
 
 # TODO
 # 1. support pp in vllm
@@ -117,6 +121,7 @@ class vLLMRollout(BaseRollout):
         #    (which can vary across different vLLM versions);
         # - Otherwise it's the desired value we want to explicitly set.
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        engine_seed = resolve_vllm_engine_seed(config, engine_kwargs)
         lora_kwargs = kwargs.pop('lora_kwargs', {})
         self.lora_kwargs = lora_kwargs
         self.inference_engine = LLM(
@@ -133,6 +138,7 @@ class vLLMRollout(BaseRollout):
             disable_log_stats=config.disable_log_stats,
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=config.enable_chunked_prefill,
+            seed=engine_seed,
             **lora_kwargs,
             **engine_kwargs,
         )
@@ -140,7 +146,7 @@ class vLLMRollout(BaseRollout):
         # Offload vllm model to reduce peak memory usage
         self.inference_engine.offload_model_weights()
 
-        kwargs = dict(
+        sampling_defaults = dict(
             n=1,
             logprobs=0,  # can be set to 0 and let actor to recompute
             max_tokens=config.response_length,
@@ -151,12 +157,13 @@ class vLLMRollout(BaseRollout):
             "0.5.4",
             "0.6.3",
         ):
-            kwargs["detokenize"] = False
+            sampling_defaults["detokenize"] = False
 
-        # supporting adding any sampling params from the config file
-        for k in config.keys():
-            if hasattr(SamplingParams(), str(k)):
-                kwargs[k] = config.get(k)
+        kwargs = build_vllm_sampling_params_kwargs(
+            config,
+            SamplingParams,
+            **sampling_defaults,
+        )
 
         print(f"kwargs: {kwargs}")
         self.sampling_params = SamplingParams(**kwargs)
