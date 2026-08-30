@@ -129,18 +129,41 @@ class Tracking:
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
 
-    def __del__(self):
-        if "wandb" in self.logger:
-            self.logger["wandb"].finish(exit_code=0)
-        if "swanlab" in self.logger:
-            self.logger["swanlab"].finish()
-        if "vemlp_wandb" in self.logger:
-            self.logger["vemlp_wandb"].finish(exit_code=0)
-        if "tensorboard" in self.logger:
-            self.logger["tensorboard"].finish()
+    def close(self):
+        """Finish all logging backends explicitly.
 
-        if "clearnml" in self.logger:
-            self.logger["clearnml"].finish()
+        Must be called at a healthy point in the program, before process
+        exit. Relying on __del__ alone is unreliable: it may run during
+        interpreter shutdown when backend worker threads are already being
+        torn down (e.g. swanlab's terminal proxy then raises
+        "cannot join current thread" and the finish record is never sent).
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        errors = []
+        finishers = (
+            ("wandb", lambda b: b.finish(exit_code=0)),
+            ("swanlab", lambda b: b.finish()),
+            ("vemlp_wandb", lambda b: b.finish(exit_code=0)),
+            ("tensorboard", lambda b: b.finish()),
+            ("clearml", lambda b: b.finish()),
+        )
+        for name, finish_fn in finishers:
+            if name not in self.logger:
+                continue
+            try:
+                finish_fn(self.logger[name])
+            except Exception as exc:  # noqa: BLE001 - finish remaining backends
+                errors.append((name, exc))
+        if errors:
+            print(f"Warning: failed to finish tracking backends: {errors}")
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 class ClearMLLogger:
